@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # ==============================
-# Simple StrongSwan IKEv2 VPN on UDP 443 with username/password for Windows
+# OpenVPN TCP 443 setup with username/password for Windows
 # ==============================
 
 VPN_USER="vpnuser"
@@ -10,62 +10,88 @@ VPN_HOST="oscarbaylisvpn.tplinkdns.com"
 
 echo "[*] Updating system..."
 apt update && apt upgrade -y
-apt install -y strongswan strongswan-pki libcharon-extra-plugins ufw
+apt install -y openvpn easy-rsa ufw
 
-echo "[*] Configuring StrongSwan..."
+echo "[*] Setting up PKI..."
+make-cadir ~/openvpn-ca
+cd ~/openvpn-ca || exit
 
-# ipsec.conf
-cat >/etc/ipsec.conf <<EOF
-config setup
-    uniqueids=never
-
-conn ikev2-vpn
-    auto=add
-    compress=no
-    type=tunnel
-    keyexchange=ikev2
-    fragmentation=yes
-    forceencaps=yes
-    dpdaction=clear
-    dpddelay=300s
-    rekey=no
-    left=%any
-    leftid=@$VPN_HOST
-    leftcert=server-cert.pem
-    leftsendcert=never
-    leftsubnet=0.0.0.0/0
-    right=%any
-    rightid=%any
-    rightauth=eap-mschapv2
-    rightsourceip=10.10.10.0/24
-    rightsendcert=never
-    eap_identity=%identity
+cat > vars <<EOF
+set_var EASYRSA_REQ_COUNTRY    "NZ"
+set_var EASYRSA_REQ_PROVINCE   "Taranaki"
+set_var EASYRSA_REQ_CITY       "New Plymouth"
+set_var EASYRSA_REQ_ORG        "VPNServer"
+set_var EASYRSA_REQ_EMAIL      "admin@$VPN_HOST"
+set_var EASYRSA_REQ_OU         "VPN"
 EOF
 
-# ipsec.secrets
-cat >/etc/ipsec.secrets <<EOF
-$VPN_USER : EAP "$VPN_PASS"
+./easyrsa init-pki
+echo -e "\n" | ./easyrsa build-ca nopass
+./easyrsa gen-req server nopass
+./easyrsa sign-req server server
+./easyrsa gen-dh
+openvpn --genkey --secret ta.key
+
+mkdir -p /etc/openvpn/server
+cp pki/ca.crt pki/private/server.key pki/issued/server.crt pki/dh.pem ta.key /etc/openvpn/server/
+
+echo "[*] Creating server config..."
+cat >/etc/openvpn/server/server.conf <<EOF
+port 443
+proto tcp
+dev tun
+ca ca.crt
+cert server.crt
+key server.key
+dh dh.pem
+tls-auth ta.key 0
+auth SHA256
+topology subnet
+server 10.8.0.0 255.255.255.0
+push "redirect-gateway def1 bypass-dhcp"
+push "dhcp-option DNS 8.8.8.8"
+keepalive 10 120
+cipher AES-256-CBC
+user nobody
+group nogroup
+persist-key
+persist-tun
+status openvpn-status.log
+verb 3
+explicit-exit-notify 1
 EOF
 
-echo "[*] Configuring StrongSwan to use UDP 443"
-cat >/etc/strongswan.d/charon.conf <<EOF
-charon {
-    plugins {
-        socket-default {
-            ike_port = 443
-            nat_t_port = 443
-        }
-    }
-}
-EOF
+echo "[*] Enabling IP forwarding..."
+sed -i '/net.ipv4.ip_forward/s/^#//g' /etc/sysctl.conf
+sysctl -p
 
 echo "[*] Setting firewall rules..."
-ufw allow 443/udp
-ufw delete allow 500/udp || true
-ufw delete allow 4500/udp || true
+ufw allow 443/tcp
+ufw enable
+ufw status
 
-echo "[*] Restarting StrongSwan..."
-systemctl restart strongswan-starter
+echo "[*] Starting OpenVPN..."
+systemctl enable openvpn@server
+systemctl start openvpn@server
+
+echo "[*] Generating client config..."
+mkdir -p ~/client-configs/files
+cat > ~/client-configs/base.conf <<EOF
+client
+dev tun
+proto tcp
+remote $VPN_HOST 443
+resolv-retry infinite
+nobind
+persist-key
+persist-tun
+remote-cert-tls server
+auth SHA256
+cipher AES-256-CBC
+auth-user-pass
+key-direction 1
+verb 3
+EOF
 
 echo "[*] Setup complete."
-echo "Connect from Windows using IKEv2 VPN at $VPN_HOST with username '$VPN_USER'."
+echo "You can now create Windows client .ovpn files using the base.conf and your username/password."
