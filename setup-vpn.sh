@@ -5,7 +5,7 @@
 # ==============================
 
 VPN_USER="vpnuser"
-VPN_PASS="vpnuserpassword"
+VPN_PASS="password"
 VPN_HOST="oscarbaylisvpn.tplinkdns.com"
 
 echo "[*] Updating system..."
